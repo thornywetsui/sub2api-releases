@@ -130,7 +130,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PROMOTE_LATEST: ${{ steps.promotion.outputs.latest }}
         run: |
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest="$PROMOTE_LATEST"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --draft=false --prerelease=false --latest="$PROMOTE_LATEST"
           echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
       - name: Report failure to the private build
         if: failure() && steps.release.outputs.draft == 'true'
@@ -143,5 +143,5 @@ jobs:
           if re.fullmatch(r'[0-9a-f]{32}', ticket):
               release = json.load(open('release.json'))
               body = (release['body'] or '') + f'\n<!-- publish:{ticket}:failure -->'
-              subprocess.run(['gh', 'api', f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/{release['id']}", '--method', 'PATCH', '--input', '-'], input=json.dumps({'body': body}), text=True, check=True)
+              subprocess.run(['gh', 'api', f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/{release['id']}", '--method', 'PATCH', '--input', '-'], input=json.dumps({'tag_name': os.environ['RELEASE_TAG'], 'body': body, 'draft': True, 'prerelease': False, 'make_latest': 'false'}), text=True, check=True)
           PY
