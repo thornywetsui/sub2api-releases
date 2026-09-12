@@ -6,7 +6,7 @@
 
 - [下载正式版本](https://github.com/thornywetsui/sub2api-releases/releases/latest)：Linux AMD64/ARM64、macOS AMD64/ARM64、Windows AMD64，附 `checksums.txt`。
 - 镜像：`ghcr.io/thornywetsui/sub2api-releases:latest`，支持 Linux AMD64/ARM64。
-- 固定版本格式：`1.0.1-upstream.0.2.4`；对应 Release 标签为 `v1.0.1-upstream.0.2.4`。
+- 固定版本格式：`1.0.2-upstream.0.2.4`；对应 Release 标签为 `v1.0.2-upstream.0.2.4`。
 
 推荐 Docker Compose：
 

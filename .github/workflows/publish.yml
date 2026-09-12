@@ -41,7 +41,9 @@ jobs:
           if ticket and not re.fullmatch(r'[0-9a-f]{32}', ticket):
               raise ValueError('Invalid publication ticket')
           PY
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          # 列表接口在写权限下包含草稿，不能使用仅查询正式版本的按标签接口。
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]' |
+            jq -s --arg tag "$RELEASE_TAG" '[.[] | select(.tag_name == $tag)] | if length == 1 then .[0] else error("Expected exactly one release") end' > release.json
           python3 - <<'PY'
           import json, os, sys
           sys.path.insert(0, 'scripts')
