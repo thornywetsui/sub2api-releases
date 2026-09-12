@@ -1,0 +1,145 @@
+name: Publish binaries and container images
+on:
+  repository_dispatch:
+    types: [release-ready]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '待发布的组合版本标签'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: public-release
+  cancel-in-progress: false
+env:
+  RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+  PUBLISH_TICKET: ${{ github.event.client_payload.ticket }}
+  IMAGE_NAME: ghcr.io/thornywetsui/sub2api-releases
+jobs:
+  publish:
+    if: github.repository == 'thornywetsui/sub2api-releases'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate requested version and load draft
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          sys.path.insert(0, 'scripts')
+          from prepare_release import version
+          version(os.environ['RELEASE_TAG'])
+          ticket = os.environ.get('PUBLISH_TICKET', '')
+          if ticket and not re.fullmatch(r'[0-9a-f]{32}', ticket):
+              raise ValueError('Invalid publication ticket')
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          python3 - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, 'scripts')
+          from prepare_release import archive_names
+          release = json.load(open('release.json'))
+          tag = os.environ['RELEASE_TAG']
+          if release['prerelease']:
+              raise ValueError('Expected stable release')
+          assets = [a['name'] for a in release['assets']]
+          expected = archive_names(tag) | {'checksums.txt'}
+          if set(assets) != expected or len(assets) != len(expected):
+              raise ValueError('Unexpected or missing release assets')
+          if f'<!-- sub2api-assets-ready:{tag} -->' not in (release['body'] or ''):
+              raise ValueError('Draft assets have not passed private validation')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"draft={str(release['draft']).lower()}\n")
+          PY
+      - name: Download and validate exact assets
+        if: steps.release.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir artifacts
+          python3 scripts/prepare_release.py prepare --tag "$RELEASE_TAG"
+      - uses: docker/setup-qemu-action@v3
+        if: steps.release.outputs.draft == 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.release.outputs.draft == 'true'
+      - uses: docker/login-action@v3
+        if: steps.release.outputs.draft == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Set image version
+        if: steps.release.outputs.draft == 'true'
+        run: echo "IMAGE_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+      - name: Publish AMD64 image
+        if: steps.release.outputs.draft == 'true'
+        id: amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: context/amd64
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}-amd64
+          labels: |
+            org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
+            org.opencontainers.image.source=https://github.com/thornywetsui/sub2api-releases
+      - name: Publish ARM64 image
+        if: steps.release.outputs.draft == 'true'
+        id: arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: context/arm64
+          file: Dockerfile
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}-arm64
+          labels: |
+            org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
+            org.opencontainers.image.source=https://github.com/thornywetsui/sub2api-releases
+      - name: Publish multi-architecture manifest and choose latest
+        if: steps.release.outputs.draft == 'true'
+        id: promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AMD64_DIGEST: ${{ steps.amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ steps.arm64.outputs.digest }}
+        run: |
+          docker buildx imagetools create --tag "$IMAGE_NAME:$IMAGE_VERSION" "$IMAGE_NAME@$AMD64_DIGEST" "$IMAGE_NAME@$ARM64_DIGEST"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[]' | jq -s '.' > artifacts/published.json
+          promote=$(python3 scripts/prepare_release.py latest --tag "$RELEASE_TAG")
+          echo "latest=$promote" >> "$GITHUB_OUTPUT"
+          if [ "$promote" = true ]; then
+            docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME:$IMAGE_VERSION"
+          fi
+      - name: Publish the completed stable release
+        if: steps.release.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTE_LATEST: ${{ steps.promotion.outputs.latest }}
+        run: |
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest="$PROMOTE_LATEST"
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report failure to the private build
+        if: failure() && steps.release.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          ticket = os.environ.get('PUBLISH_TICKET', '')
+          if re.fullmatch(r'[0-9a-f]{32}', ticket):
+              release = json.load(open('release.json'))
+              body = (release['body'] or '') + f'\n<!-- publish:{ticket}:failure -->'
+              subprocess.run(['gh', 'api', f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/{release['id']}", '--method', 'PATCH', '--input', '-'], input=json.dumps({'body': body}), text=True, check=True)
+          PY
